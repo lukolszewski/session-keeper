@@ -363,6 +363,22 @@ get_claude_session() {
 		fi
 	fi
 
+	# Method 1b: Claude's own per-PID session registry.
+	# Claude Code writes $CLAUDE_CONFIG_DIR/sessions/<pid>.json containing the
+	# live sessionId for that process. It is PID-specific like the hook state
+	# file, but needs no hook, so sessions started before the plugin was
+	# installed (or before the hook was loaded) still resolve exactly.
+	local registry_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/sessions/${claude_pid}.json"
+	if [ -f "$registry_file" ]; then
+		local sid
+		sid=$(jq -r --arg pid "$claude_pid" \
+			'select((.pid | tostring) == $pid) | .sessionId // empty' "$registry_file" 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+
 	# Method 2: session selector in process args (chicken-and-egg fallback).
 	# After restore, claude is launched as `claude --resume <session_id>`, and
 	# `claude --session-id <uuid>` names the session up front the same way.
@@ -428,6 +444,29 @@ get_cursor_session() {
 	# --resume=<id> or --resume <id>.
 	sid=$(_arg_value "$args" --resume)
 	[ -n "$sid" ] && printf '%s\n' "$sid"
+}
+
+# Print the absolute path of the executable a Claude process is running, so
+# restore can relaunch that exact version instead of whatever `claude` is on
+# PATH (native installs keep one binary per version under
+# ~/.local/share/claude/versions/, and local npm installs live under
+# node_modules/). Prints nothing when the path is unavailable (no /proc, as on
+# macOS) or is a script interpreter (an npm cli.js launched through node),
+# in which case restore keeps using `claude` from PATH.
+claude_binary_from_pid() {
+	local exe
+	exe=$(readlink "/proc/$1/exe" 2>/dev/null) || return 0
+	case "$exe" in
+	/*) ;;
+	*) return 0 ;;
+	esac
+	case "${exe##*/}" in
+	node | nodejs | bun | deno | *" (deleted)") return 0 ;;
+	esac
+	case "$exe" in
+	*[[:space:]]*) return 0 ;;
+	esac
+	printf '%s\n' "$exe"
 }
 
 cursor_binary_from_args() {
@@ -2387,10 +2426,13 @@ resolve_pane_candidates() {
 			esac
 
 			if [ -n "$session_id" ]; then
-				local cli_args model="" env_json="null" state_file="" copilot_home="" cursor_binary=""
+				local cli_args model="" env_json="null" state_file="" copilot_home="" cursor_binary="" claude_binary=""
 				cli_args=$(extract_cli_args "$cand_tool" "$cand_args" "$cand_pid")
 				if [ "$cand_tool" = "cursor" ]; then
 					cursor_binary=$(cursor_binary_from_args "$cand_args")
+				fi
+				if [ "$cand_tool" = "claude" ]; then
+					claude_binary=$(claude_binary_from_pid "$cand_pid")
 				fi
 				model="$cached_model"
 				env_json="$cached_env"
@@ -2426,9 +2468,9 @@ resolve_pane_candidates() {
 
 				# Write TSV for batch JSON conversion (replaces per-entry jq -n).
 				# New columns are appended so the existing indices stay put.
-				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 					"$pane_target" "$cand_tool" "$session_id" "$pane_cwd" "$cand_pid" "$model" "$cli_args" "$env_json" "$copilot_home" \
-					"$pane_session" "$pane_window" "$pane_pane_index" "$cursor_binary" >>"$parts_file"
+					"$pane_session" "$pane_window" "$pane_pane_index" "$cursor_binary" "$claude_binary" >>"$parts_file"
 
 				case "$cand_tool" in
 				claude) register_claude_session_id "$session_id" ;;
@@ -2790,7 +2832,7 @@ main() {
 			{pane:.[0], tool:.[1], session_id:.[2], cwd:.[3], pid:.[4], model:.[5], cli_args:.[6],
 			 env:(.[7] // "null" | try fromjson catch null), copilot_home:(.[8] // ""),
 			 session_name:(.[9] // ""), window_index:(.[10] // ""), pane_index:(.[11] // ""),
-			 cursor_binary:(.[12] // "")})
+			 cursor_binary:(.[12] // ""), claude_binary:(.[13] // "")})
 			| {timestamp: $ts, sessions: .}
 		' "$PARTS_FILE" >"$SESSIONS_TMP"; then
 		rm -f "$SESSIONS_TMP" "$OUTPUT_TMP"
@@ -2904,10 +2946,13 @@ emit_session() {
 
 	if [ -n "$session_id" ]; then
 		# Extract CLI args (flags without binary name and session/resume args)
-		local cli_args copilot_home="" cursor_binary=""
+		local cli_args copilot_home="" cursor_binary="" claude_binary=""
 		cli_args=$(extract_cli_args "$tool" "$cargs" "$cpid")
 		if [ "$tool" = "cursor" ]; then
 			cursor_binary=$(cursor_binary_from_args "$cargs")
+		fi
+		if [ "$tool" = "claude" ]; then
+			claude_binary=$(claude_binary_from_pid "$cpid")
 		fi
 		if [ "$tool" = "copilot" ]; then
 			copilot_home="${copilot_state_dir%/session-state}"
@@ -2955,8 +3000,9 @@ emit_session() {
 			--arg window_index "$PANE_TARGET_WINDOW" \
 			--arg pane_index "$PANE_TARGET_INDEX" \
 			--arg cursor_binary "$cursor_binary" \
+			--arg claude_binary "$claude_binary" \
 			--argjson env "${env_json:-null}" \
-			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env, copilot_home: $copilot_home, session_name: $session_name, window_index: $window_index, pane_index: $pane_index, cursor_binary: $cursor_binary}' >>"$PARTS_FILE"
+			'{pane: $pane, tool: $tool, session_id: $sid, cwd: $cwd, pid: $pid, model: $model, cli_args: $cli_args, env: $env, copilot_home: $copilot_home, session_name: $session_name, window_index: $window_index, pane_index: $pane_index, cursor_binary: $cursor_binary, claude_binary: $claude_binary}' >>"$PARTS_FILE"
 		case "$tool" in
 		claude) register_claude_session_id "$session_id" ;;
 		codex) register_codex_session_id "$session_id" ;;

@@ -197,6 +197,7 @@ while read -r entry; do
 		and optional_string("model")
 		and optional_string("copilot_home")
 		and optional_string("cursor_binary")
+		and optional_string("claude_binary")
 		and optional_string("session_name")
 		and optional_string("window_index")
 		and optional_string("pane_index")
@@ -239,6 +240,7 @@ while read -r entry; do
 		esac
 	fi
 	cursor_binary=$(printf '%s\n' "$entry" | jq -r '.cursor_binary // empty')
+	claude_binary=$(printf '%s\n' "$entry" | jq -r '.claude_binary // empty')
 
 	if [ "$kind" = "session" ]; then
 		if [ -z "$session_id" ] || [ "${#session_id}" -gt 256 ] ||
@@ -415,10 +417,28 @@ while read -r entry; do
 
 		case "$tool" in
 	claude)
+		# Relaunch the exact executable observed at save time, so a session
+		# started from a pinned or local install comes back in that version.
+		# Fall back to `claude` from PATH when the field is absent (older
+		# sidecars, macOS) or that version has since been removed, e.g. pruned
+		# by Claude's auto-updater.
+		claude_cmd="claude"
+		if [ -n "$claude_binary" ]; then
+			case "$claude_binary" in
+			/*)
+				if [ -f "$claude_binary" ] && [ -x "$claude_binary" ]; then
+					claude_cmd=$(shell_quote "$pane_cmd" "$claude_binary")
+				else
+					log "saved claude binary $claude_binary missing for $pane, falling back to claude on PATH"
+				fi
+				;;
+			*) log "ignoring non-absolute claude binary for $pane" ;;
+			esac
+		fi
 		if [ -n "$safe_cli_args" ] || [ -n "$safe_model_arg" ]; then
-			resume_cmd="command claude${safe_cli_args}${safe_model_arg} --resume ${safe_sid}"
+			resume_cmd="command ${claude_cmd}${safe_cli_args}${safe_model_arg} --resume ${safe_sid}"
 		else
-			resume_cmd="command claude --resume ${safe_sid}"
+			resume_cmd="command ${claude_cmd} --resume ${safe_sid}"
 		fi
 		;;
 	cursor)

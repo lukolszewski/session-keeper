@@ -813,6 +813,34 @@ assert_eq "Cursor restore succeeds" "0" "$RESTORE_STATUS"
 assert_contains "Cursor resumes the exact session with saved invocation flags" "$(cat "$TMUX_LOG")" \
 	"command agent '--mode' 'plan' '--model' 'auto' '--sandbox' 'enabled' --resume '750b1c55-f1b2-4ff1-804e-9c38d1b2c7e2'"
 
+echo "== Claude relaunches the saved executable =="
+pinned_claude="$SANDBOX/claude-versions/2.1.220"
+mkdir -p "${pinned_claude%/*}"
+printf '#!/bin/sh\n' >"$pinned_claude"
+chmod +x "$pinned_claude"
+export MOCK_PANES='%15|0|0|pin-ok
+%16|0|0|pin-gone
+%17|0|0|pin-relative'
+export MOCK_SHELLS='%15|bash
+%16|bash
+%17|bash'
+export MOCK_CAPTURE_ENV=''
+jq -n --arg bin "$pinned_claude" --arg gone "$SANDBOX/claude-versions/2.1.195" '{sessions:[
+  {pane:"pin-ok:0.0",session_name:"pin-ok",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-pin",cwd:"",claude_binary:$bin},
+  {pane:"pin-gone:0.0",session_name:"pin-gone",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-gone",cwd:"",claude_binary:$gone},
+  {pane:"pin-relative:0.0",session_name:"pin-relative",window_index:"0",pane_index:"0",tool:"claude",session_id:"sid-rel",cwd:"",claude_binary:"../node_modules/claude"}
+]}' >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+restore_log=$(cat "$RESURRECT_DIR/assistant-restore.log")
+assert_eq "pinned Claude restore succeeds" "0" "$RESTORE_STATUS"
+assert_contains "existing saved binary is relaunched by absolute path" "$(cat "$TMUX_LOG")" \
+	"command '$pinned_claude' --resume 'sid-pin'"
+assert_contains "pruned saved binary falls back to claude on PATH" "$(cat "$TMUX_LOG")" \
+	"command claude --resume 'sid-gone'"
+assert_contains "pruned saved binary is logged" "$restore_log" "falling back to claude on PATH"
+assert_contains "relative saved binary falls back to claude on PATH" "$(cat "$TMUX_LOG")" \
+	"command claude --resume 'sid-rel'"
+
 echo "== malformed entries are isolated =="
 export MOCK_PANES='%1|0|0|bad-env
 %2|0|0|bad-id
