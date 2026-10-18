@@ -57,6 +57,14 @@ fi
 # dynamic when users change @resurrect-dir.
 tmux set-option -g @resurrect-hook-post-save-all "$(hook_command "${CURRENT_DIR}/scripts/save-assistant-sessions.sh")"
 tmux set-option -g @resurrect-hook-post-restore-all "$(hook_command "${CURRENT_DIR}/scripts/restore-assistant-sessions.sh")"
+# Save each pane's foreground job instead of its first child process (see
+# save_command_strategies/foreground.sh). Resurrect resolves the option as
+# <resurrect>/save_command_strategies/<name>.sh, so climb to / with surplus
+# `..` (extra ones are no-ops at the root) and then descend to this checkout.
+if [ -z "$(tmux show-option -gqv @resurrect-save-command-strategy)" ]; then
+    tmux set-option -g @resurrect-save-command-strategy \
+        "../../../../../../../../../../../../../../../..${CURRENT_DIR}/save_command_strategies/foreground"
+fi
 # Respect user's @continuum-save-interval if already set
 if [ -z "$(tmux show-option -gqv @continuum-save-interval)" ]; then
     tmux set-option -g @continuum-save-interval '5'
