@@ -1,4 +1,114 @@
-# tmux-assistant-resurrect
+# session-keeper
+
+Restore your whole tmux workspace after a reboot or crash: sessions, windows
+(names, order, layout, working directories), long-running tools such as `btop`
+or `tail -f`, and every AI coding agent, resumed in its own conversation and,
+for Claude Code, in the exact version that was running.
+
+## About this fork
+
+session-keeper is a fork of
+[timvw/tmux-assistant-resurrect](https://github.com/timvw/tmux-assistant-resurrect)
+(MIT). Everything from the section *tmux-assistant-resurrect* below describes
+the upstream project and still applies. This fork adds:
+
+| Change | Why |
+|--------|-----|
+| **Claude Code is relaunched in the exact version that was running.** The save hook records the real binary of each Claude process (`readlink /proc/<pid>/exe`) as `claude_binary` in `assistant-sessions.json`. Restore runs that binary with `--resume <id>`; if it no longer exists or is not executable, it falls back to `claude` from `PATH` and logs the fallback. Node, Bun and Deno launchers and deleted binaries are never pinned. | Upstream always runs `claude` from `PATH`. If you keep several Claude Code versions side by side (local npm installs, test builds, a global install), a session must come back in the version it was created with. |
+| **Claude's own session registry is read.** Claude Code writes `~/.claude/sessions/<pid>.json` (`sessionId`, `pid`, `version`) for each live process. The save hook uses it (respecting `CLAUDE_CONFIG_DIR`) right after the hook state file, before argv and transcript guessing. | Exact PID-to-session mapping even when the `SessionStart` hook never fired for a process, so two Claude instances in one directory are not confused. |
+| **Panes save their foreground job, not their first child process.** A new tmux-resurrect save strategy (`save_command_strategies/foreground.sh`) reads the terminal's foreground process group (`tpgid`) and saves that job's exact argv. It is selected automatically unless you already set `@resurrect-save-command-strategy`. Trailing NUL padding left by programs that rewrite their process title is trimmed. | Resurrect's bundled strategies take the shell's first child. A shell that once ran `alacritty &` and then `tail -f log` saved `alacritty`, so `tail -f` never came back. |
+
+Tested on Linux with tmux 3.3a: on a real reboot, 11 of 13 agent panes were
+resumed (the other two were skipped because their saved directory had been
+deleted), each Claude session in its saved version, and all other windows came
+back with their names, layout and directories. Upstream's test suite (Docker,
+tmux 3.4 to 3.7) still covers everything else; the fork adds unit tests in
+`test/restore-unit-tests.sh`. Version pinning reads `/proc`, so on macOS restore
+falls back to `claude` from `PATH` as upstream does.
+
+### How it works, end to end
+
+```
+tmux-continuum (every 5 min)  ->  tmux-resurrect save
+    layout, window names/order, pane cwd        -> ~/.local/share/tmux/resurrect/last
+    each pane's foreground command (this fork)  -> same file
+    post-save hook: session-keeper              -> assistant-sessions.json
+        tool, session id, cwd, flags, env, claude_binary (this fork)
+
+tmux server starts (fresh, within 10 s)  ->  continuum auto-restore
+    tmux-resurrect rebuilds sessions, windows, panes, cwds
+    restarts commands listed in @resurrect-processes (btop, tail -f, ...)
+    post-restore hook: session-keeper types the resume command into each
+        agent pane after checking it is an idle shell with no agent running:
+        '/path/to/that/claude' --resume <id>,  pi --session <id>,  ...
+```
+
+Agents are never put in `@resurrect-processes`: the restore hook is their only
+launcher, which avoids starting them twice.
+
+### Install this fork
+
+Prerequisites: tmux, `jq`, `bash`, and git. TPM is optional.
+
+**With TPM** (installs tmux-resurrect and tmux-continuum too):
+
+```tmux
+# ~/.tmux.conf
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @plugin 'lukolszewski/session-keeper'
+
+set -g @continuum-save-interval '5'
+set -g @continuum-restore 'on'
+# Non-agent programs to restart; ~ means "command contains".
+# Never list claude, pi, copilot, ... here.
+set -g @resurrect-processes 'btop nvtop "~tail -f" "~journalctl -f"'
+
+run '~/.tmux/plugins/tpm/tpm'   # must be last
+```
+
+Then press `prefix + I` inside tmux.
+
+**From a local checkout** (edits apply directly, no TPM needed for this plugin):
+
+```bash
+git clone https://github.com/lukolszewski/session-keeper ~/dev/session-keeper
+git clone https://github.com/tmux-plugins/tmux-resurrect ~/.tmux/plugins/tmux-resurrect
+git clone https://github.com/tmux-plugins/tmux-continuum ~/.tmux/plugins/tmux-continuum
+```
+
+```tmux
+# ~/.tmux.conf, after the resurrect/continuum options above
+run-shell '~/.tmux/plugins/tmux-resurrect/resurrect.tmux'
+run-shell '~/.tmux/plugins/tmux-continuum/continuum.tmux'
+run-shell '~/dev/session-keeper/tmux-assistant-resurrect.tmux'
+```
+
+**Load it into a running tmux without restarting:** `tmux source-file ~/.tmux.conf`.
+Loading the plugin installs the Claude Code `SessionStart`/`SessionEnd` hooks in
+`~/.claude/settings.json` (Claude sessions started before that are still found
+through the session registry). Trigger a first save with `prefix + Ctrl-s` and
+check it:
+
+```bash
+jq -r '.sessions[] | "\(.pane) \(.tool) \(.session_id) \(.claude_binary // "")"' \
+  ~/.local/share/tmux/resurrect/assistant-sessions.json
+```
+
+### Restoring after a reboot or crash
+
+Just start tmux (`tmux` in any terminal). Continuum restores automatically when
+the server is fresh, within `@continuum-restore-max-delay` (10 s). If tmux was
+already started some other way, press `prefix + Ctrl-r`. What happened to each
+agent pane is logged in `~/.local/share/tmux/resurrect/assistant-restore.log`.
+
+If you are reading this inside one of the restored agents, note that the
+restore will also resume that same session in its old pane; quit one of them.
+
+---
+
+# tmux-assistant-resurrect (upstream documentation)
 
 > **Disclaimer**: This project was entirely vibecoded (designed and implemented
 > through conversation with AI coding assistants). It has been end-to-end tested
@@ -99,7 +209,7 @@ Add to your `~/.tmux.conf`:
 set -g @plugin 'tmux-plugins/tpm'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
-set -g @plugin 'timvw/tmux-assistant-resurrect'
+set -g @plugin 'lukolszewski/session-keeper'
 
 # Optional: restore terminal text in non-assistant panes after tmux restart.
 # If enabled, the plugin automatically strips captured content for assistant
@@ -156,7 +266,7 @@ to clear its diagnostics.
 
 ## Uninstallation
 
-**TPM users**: Remove the `@plugin 'timvw/tmux-assistant-resurrect'` line from
+**TPM users**: Remove the `@plugin 'lukolszewski/session-keeper'` line from
 `~/.tmux.conf`, then press `prefix + alt + u` inside tmux.
 
 **`just install` users**: Run `just uninstall` from the plugin directory — this
