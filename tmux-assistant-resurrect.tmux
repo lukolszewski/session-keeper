@@ -73,6 +73,23 @@ fi
 if [ -z "$(tmux show-option -gqv @continuum-restore)" ]; then
     tmux set-option -g @continuum-restore 'on'
 fi
+# Make sure a freshly started server is actually restored. continuum's own
+# auto-restore misses in two ways: it reads @continuum-restore the moment it is
+# loaded, before the default above when it is listed first (the usual @plugin
+# order); and its "another server is running" check counts every tmux process,
+# including its own `tmux set-option status-right` started right after the
+# check, so it skips the restore at random. startup-restore.sh waits for
+# continuum's attempt and restores only if none happened.
+start_time=$(tmux display-message -p '#{start_time}' 2>/dev/null)
+max_delay=$(tmux show-option -gqv @continuum-restore-max-delay)
+case "$start_time" in
+'' | *[!0-9]*) ;;
+*)
+    if [ "$start_time" -gt "$(($(date +%s) - ${max_delay:-10}))" ]; then
+        "${CURRENT_DIR}/scripts/startup-restore.sh" >/dev/null 2>&1 </dev/null &
+    fi
+    ;;
+esac
 
 # --- Claude Code hooks ---
 

@@ -18,6 +18,9 @@ source "$SCRIPT_DIR/lib-replay.sh"
 # Follow tmux-resurrect's own save-dir resolution (resurrect_data_dir in
 # lib-detect.sh) so we read the sidecar from wherever resurrect saved it.
 RESURRECT_DIR="$(resurrect_data_dir)"
+# Tell startup-restore.sh this server has been restored, by continuum or by
+# hand, so it does not restore a second time.
+tmux set-option -gq @assistant-resurrect-restored 1 2>/dev/null || true
 INPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
 # Prefer the snapshot saved with the layout being restored, so pointing `last`
 # at an older layout brings back that layout's agents too. Saves made before

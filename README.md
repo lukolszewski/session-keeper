@@ -16,6 +16,7 @@ the upstream project and still applies. This fork adds:
 |--------|-----|
 | **Claude Code is relaunched in the exact version that was running.** The save hook records the real binary of each Claude process (`readlink /proc/<pid>/exe`) as `claude_binary` in `assistant-sessions.json`. Restore runs that binary with `--resume <id>`; if it no longer exists or is not executable, it falls back to `claude` from `PATH` and logs the fallback. Node, Bun and Deno launchers and deleted binaries are never pinned. | Upstream always runs `claude` from `PATH`. If you keep several Claude Code versions side by side (local npm installs, test builds, a global install), a session must come back in the version it was created with. |
 | **Claude's own session registry is read.** Claude Code writes `~/.claude/sessions/<pid>.json` (`sessionId`, `pid`, `version`) for each live process. The save hook uses it (respecting `CLAUDE_CONFIG_DIR`) right after the hook state file, before argv and transcript guessing. | Exact PID-to-session mapping even when the `SessionStart` hook never fired for a process, so two Claude instances in one directory are not confused. |
+| **Starting tmux restores the last save, reliably.** When the server has just started, `scripts/startup-restore.sh` waits until the config has loaded and continuum's own attempt has finished. If no restore happened, it runs tmux-resurrect's restore itself, keeping continuum's guards (`@continuum-restore` must be `on`, `~/tmux_no_auto_restore` must not exist, no other tmux server may be running). It does nothing when a restore already ran, so the agents are never started twice. | continuum's auto-restore failed silently in two ways. It reads `@continuum-restore` when it is loaded, which is before this plugin sets it when continuum is listed first, the usual order. And its "is another tmux server running" check counts every `tmux` process, including the `tmux set-option` continuum itself starts right after the check, so even with `@continuum-restore 'on'` set it skipped the restore in about half of the starts in a test container. |
 | **Each saved layout keeps its own agent list.** Every save also copies `assistant-sessions.json` to `tmux_resurrect_<timestamp>.assistant-sessions.json`, next to the layout file `last` points to. Restore reads the copy that belongs to the layout `last` points to, and falls back to `assistant-sessions.json` for layouts saved before this change. Copies whose layout file tmux-resurrect has deleted are removed. | `assistant-sessions.json` is rewritten by every save. After a crash, an empty tmux left running for one save interval overwrote it, so pointing `last` back at the pre-crash layout restored the windows but none of the agents. |
 | **Panes save their foreground job, not their first child process.** A new tmux-resurrect save strategy (`save_command_strategies/foreground.sh`) reads the terminal's foreground process group (`tpgid`) and saves that job's exact argv. It is selected automatically unless you already set `@resurrect-save-command-strategy`. Trailing NUL padding left by programs that rewrite their process title is trimmed. | Resurrect's bundled strategies take the shell's first child. A shell that once ran `alacritty &` and then `tail -f log` saved `alacritty`, so `tail -f` never came back. |
 
@@ -24,7 +25,10 @@ resumed (the other two were skipped because their saved directory had been
 deleted), each Claude session in its saved version, and all other windows came
 back with their names, layout and directories. Upstream's test suite (Docker,
 tmux 3.4 to 3.7) still covers everything else; the fork adds unit tests in
-`test/restore-unit-tests.sh`. Version pinning reads `/proc`, so on macOS restore
+`test/restore-unit-tests.sh` and a Docker test of starting tmux,
+`test/startup-restore-docker-test.sh` (restores exactly once with the option
+set, unset, and with the plugin listed first; and does not restore when
+auto-restore is off, the halt file exists, or another server is running). Version pinning reads `/proc`, so on macOS restore
 falls back to `claude` from `PATH` as upstream does.
 
 ### How it works, end to end
@@ -36,7 +40,8 @@ tmux-continuum (every 5 min)  ->  tmux-resurrect save
     post-save hook: session-keeper              -> assistant-sessions.json
         tool, session id, cwd, flags, env, claude_binary (this fork)
 
-tmux server starts (fresh, within 10 s)  ->  continuum auto-restore
+tmux server starts (fresh, within 10 s)  ->  continuum auto-restore,
+                                             or startup-restore.sh if it didn't (this fork)
     tmux-resurrect rebuilds sessions, windows, panes, cwds
     restarts commands listed in @resurrect-processes (btop, tail -f, ...)
     post-restore hook: session-keeper types the resume command into each
@@ -71,6 +76,12 @@ run '~/.tmux/plugins/tpm/tpm'   # must be last
 
 Then press `prefix + I` inside tmux.
 
+**Keep `set -g @continuum-restore 'on'` in your config.** It is what makes
+starting tmux restore your last session. The plugin turns it on when it is
+unset, and makes sure the restore actually happens, but writing it down keeps
+the behaviour visible and independent of plugin order. To stop automatic
+restore, set it to `'off'` or create `~/tmux_no_auto_restore`.
+
 **From a local checkout** (edits apply directly, no TPM needed for this plugin):
 
 ```bash
@@ -97,11 +108,25 @@ jq -r '.sessions[] | "\(.pane) \(.tool) \(.session_id) \(.claude_binary // "")"'
   ~/.local/share/tmux/resurrect/assistant-sessions.json
 ```
 
+**Check that starting tmux restores, before you need it:**
+
+```bash
+tmux show -gv @continuum-restore     # must print: on
+ls ~/tmux_no_auto_restore            # must not exist
+tmux show -gv @resurrect-hook-post-restore-all   # must name restore-assistant-sessions.sh
+```
+
+Then, with your work saved (`prefix + Ctrl-s`), quit tmux completely
+(`tmux kill-server`) and start it again with `tmux`. Within a few seconds the
+windows come back and the agents resume.
+
 ### Restoring after a reboot or crash
 
-Just start tmux (`tmux` in any terminal). Continuum restores automatically when
-the server is fresh, within `@continuum-restore-max-delay` (10 s). If tmux was
-already started some other way, press `prefix + Ctrl-r` (your prefix, then
+Just start tmux (`tmux` in any terminal). A fresh server restores the last save
+by itself: continuum tries first, and `startup-restore.sh` restores a few
+seconds later if continuum did not. If tmux was already started some other way
+(more than `@continuum-restore-max-delay`, 10 s, before this plugin loaded),
+press `prefix + Ctrl-r` (your prefix, then
 `Ctrl-r`; `Ctrl-b Ctrl-r` with the default prefix). What happened to each
 agent pane is logged in `~/.local/share/tmux/resurrect/assistant-restore.log`.
 
@@ -117,9 +142,9 @@ ln -sf tmux_resurrect_<timestamp>.txt last
 # then prefix + Ctrl-r
 ```
 
-Check auto-restore: `tmux show -gv @continuum-restore` must print `on`, the
-file `~/tmux_no_auto_restore` must not exist, and no other tmux server may be
-running when you start tmux.
+If starting tmux restored nothing at all, check the three conditions above
+(`@continuum-restore` is `on`, no `~/tmux_no_auto_restore`, no other tmux
+server running when you started it).
 
 If you are reading this inside one of the restored agents, note that the
 restore will also resume that same session in its old pane; quit one of them.
@@ -228,6 +253,9 @@ set -g @plugin 'tmux-plugins/tpm'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
 set -g @plugin 'lukolszewski/session-keeper'
+
+# Restore the last saved session when tmux starts.
+set -g @continuum-restore 'on'
 
 # Optional: restore terminal text in non-assistant panes after tmux restart.
 # If enabled, the plugin automatically strips captured content for assistant

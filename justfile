@@ -635,6 +635,10 @@ test-copilot:
 test-relaunch:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/relaunch-unit-tests.sh"
 
+# Start tmux fresh in Docker and check it restores exactly once (needs Docker)
+test-startup-restore:
+    @bash "{{repo_dir}}/test/startup-restore-docker-test.sh"
+
 # Run hermetic restore validation/quoting tests (no tmux or CLI needed)
 test-restore:
     @"${TEST_BASH:-bash}" "{{repo_dir}}/test/restore-unit-tests.sh"
