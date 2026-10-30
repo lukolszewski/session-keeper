@@ -19,6 +19,13 @@ source "$SCRIPT_DIR/lib-replay.sh"
 # lib-detect.sh) so we read the sidecar from wherever resurrect saved it.
 RESURRECT_DIR="$(resurrect_data_dir)"
 INPUT_FILE="${RESURRECT_DIR}/assistant-sessions.json"
+# Prefer the snapshot saved with the layout being restored, so pointing `last`
+# at an older layout brings back that layout's agents too. Saves made before
+# snapshots existed have none and use the latest sidecar.
+SNAPSHOT_FILE="$(assistant_snapshot_for_last "$RESURRECT_DIR")"
+if [ -n "$SNAPSHOT_FILE" ] && [ -f "$SNAPSHOT_FILE" ]; then
+	INPUT_FILE="$SNAPSHOT_FILE"
+fi
 LOG_FILE="${RESURRECT_DIR}/assistant-restore.log"
 
 # The log contains session ids and reconstructed CLI arguments/environment.
@@ -132,6 +139,7 @@ pane_shell_name() {
 	esac
 }
 
+log "reading ${INPUT_FILE##*/}"
 if [ ! -f "$INPUT_FILE" ]; then
 	log "no saved sessions found at $INPUT_FILE"
 	exit 0

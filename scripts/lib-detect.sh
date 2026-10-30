@@ -596,6 +596,36 @@ resurrect_data_dir() {
 	echo "$dir" | sed "s,\$HOME,$HOME,g; s,\$HOSTNAME,$host,g; s,~,$HOME,g"
 }
 
+# Path of the assistant snapshot that belongs to the layout file `last` points
+# to: tmux_resurrect_<ts>.txt -> tmux_resurrect_<ts>.assistant-sessions.json.
+# Prints nothing when `last` is missing or does not name an existing layout.
+#
+# assistant-sessions.json alone is rewritten by every save, so an empty tmux
+# started after a crash overwrites the agent list within one continuum
+# interval; re-pointing `last` at the pre-crash layout would then restore the
+# windows but no agents. One snapshot per layout file keeps the two in step.
+assistant_snapshot_for_last() {
+	local dir="$1" target
+	target=$(readlink "$dir/last" 2>/dev/null) || return 0
+	target="${target##*/}"
+	case "$target" in
+	tmux_resurrect_*.txt) ;;
+	*) return 0 ;;
+	esac
+	[ -f "$dir/$target" ] || return 0
+	printf '%s/%s.assistant-sessions.json\n' "$dir" "${target%.txt}"
+}
+
+# Remove snapshots whose layout file tmux-resurrect has pruned. Resurrect's
+# own cleanup only matches tmux_resurrect_*.txt.
+prune_assistant_snapshots() {
+	local dir="$1" snap
+	for snap in "$dir"/tmux_resurrect_*.assistant-sessions.json; do
+		[ -f "$snap" ] || continue
+		[ -f "${snap%.assistant-sessions.json}.txt" ] || rm -f "$snap"
+	done
+}
+
 # Directory holding the per-process assistant state files (claude-<pid>.json,
 # opencode-<pid>.json).
 #

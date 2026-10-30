@@ -2861,6 +2861,7 @@ main() {
 		log "saved $count assistant session(s) to $OUTPUT_FILE"
 	fi
 	[ "$relaunch_count" -gt 0 ] && log "saved $relaunch_count vouched assistant relaunch command(s)"
+	snapshot_assistant_sessions
 
 	# Strip captured pane contents for assistant panes so tmux-resurrect
 	# won't restore stale TUI output that the post-restore hook would
@@ -2868,6 +2869,23 @@ main() {
 	if [ $((count + relaunch_count)) -gt 0 ]; then
 		strip_assistant_pane_contents
 	fi
+}
+
+# Copy the sidecar next to the layout file `last` points to (see
+# assistant_snapshot_for_last in lib-detect.sh), atomically and owner-only like
+# the sidecar itself. A failed copy keeps the previous snapshot.
+snapshot_assistant_sessions() {
+	local snap tmp
+	snap=$(assistant_snapshot_for_last "$RESURRECT_DIR")
+	if [ -n "$snap" ]; then
+		if tmp=$(mktemp "${snap}.tmp.XXXXXX") && cp "$OUTPUT_FILE" "$tmp" && mv -f "$tmp" "$snap"; then
+			log "snapshot ${snap##*/}"
+		else
+			[ -n "${tmp:-}" ] && rm -f "$tmp"
+			log "warning: failed to write snapshot $snap"
+		fi
+	fi
+	prune_assistant_snapshots "$RESURRECT_DIR"
 }
 
 # Remove assistant pane entries from tmux-resurrect's pane_contents.tar.gz.

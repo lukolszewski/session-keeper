@@ -16,6 +16,7 @@ the upstream project and still applies. This fork adds:
 |--------|-----|
 | **Claude Code is relaunched in the exact version that was running.** The save hook records the real binary of each Claude process (`readlink /proc/<pid>/exe`) as `claude_binary` in `assistant-sessions.json`. Restore runs that binary with `--resume <id>`; if it no longer exists or is not executable, it falls back to `claude` from `PATH` and logs the fallback. Node, Bun and Deno launchers and deleted binaries are never pinned. | Upstream always runs `claude` from `PATH`. If you keep several Claude Code versions side by side (local npm installs, test builds, a global install), a session must come back in the version it was created with. |
 | **Claude's own session registry is read.** Claude Code writes `~/.claude/sessions/<pid>.json` (`sessionId`, `pid`, `version`) for each live process. The save hook uses it (respecting `CLAUDE_CONFIG_DIR`) right after the hook state file, before argv and transcript guessing. | Exact PID-to-session mapping even when the `SessionStart` hook never fired for a process, so two Claude instances in one directory are not confused. |
+| **Each saved layout keeps its own agent list.** Every save also copies `assistant-sessions.json` to `tmux_resurrect_<timestamp>.assistant-sessions.json`, next to the layout file `last` points to. Restore reads the copy that belongs to the layout `last` points to, and falls back to `assistant-sessions.json` for layouts saved before this change. Copies whose layout file tmux-resurrect has deleted are removed. | `assistant-sessions.json` is rewritten by every save. After a crash, an empty tmux left running for one save interval overwrote it, so pointing `last` back at the pre-crash layout restored the windows but none of the agents. |
 | **Panes save their foreground job, not their first child process.** A new tmux-resurrect save strategy (`save_command_strategies/foreground.sh`) reads the terminal's foreground process group (`tpgid`) and saves that job's exact argv. It is selected automatically unless you already set `@resurrect-save-command-strategy`. Trailing NUL padding left by programs that rewrite their process title is trimmed. | Resurrect's bundled strategies take the shell's first child. A shell that once ran `alacritty &` and then `tail -f log` saved `alacritty`, so `tail -f` never came back. |
 
 Tested on Linux with tmux 3.3a: on a real reboot, 11 of 13 agent panes were
@@ -100,8 +101,25 @@ jq -r '.sessions[] | "\(.pane) \(.tool) \(.session_id) \(.claude_binary // "")"'
 
 Just start tmux (`tmux` in any terminal). Continuum restores automatically when
 the server is fresh, within `@continuum-restore-max-delay` (10 s). If tmux was
-already started some other way, press `prefix + Ctrl-r`. What happened to each
+already started some other way, press `prefix + Ctrl-r` (your prefix, then
+`Ctrl-r`; `Ctrl-b Ctrl-r` with the default prefix). What happened to each
 agent pane is logged in `~/.local/share/tmux/resurrect/assistant-restore.log`.
+
+If nothing came back and tmux has been running for a while, continuum has
+probably saved the empty session as the newest state. Point `last` back at the
+last layout from before the crash and restore again; the agents saved with that
+layout come back with it:
+
+```bash
+cd ~/.local/share/tmux/resurrect
+ls -lt tmux_resurrect_*.txt | head        # pick the last one before the crash
+ln -sf tmux_resurrect_<timestamp>.txt last
+# then prefix + Ctrl-r
+```
+
+Check auto-restore: `tmux show -gv @continuum-restore` must print `on`, the
+file `~/tmux_no_auto_restore` must not exist, and no other tmux server may be
+running when you start tmux.
 
 If you are reading this inside one of the restored agents, note that the
 restore will also resume that same session in its old pane; quit one of them.

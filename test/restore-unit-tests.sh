@@ -841,6 +841,48 @@ assert_contains "pruned saved binary is logged" "$restore_log" "falling back to 
 assert_contains "relative saved binary falls back to claude on PATH" "$(cat "$TMUX_LOG")" \
 	"command claude --resume 'sid-rel'"
 
+echo "== restore reads the snapshot saved with the layout 'last' points to =="
+export MOCK_PANES='%15|0|0|snap'
+export MOCK_SHELLS='%15|bash'
+snap_entry() {
+	jq -n --arg sid "$1" '{sessions:[{pane:"snap:0.0",session_name:"snap",window_index:"0",pane_index:"0",tool:"claude",session_id:$sid,cwd:""}]}'
+}
+# The latest sidecar is from the empty tmux started after a crash; `last` was
+# re-pointed at the pre-crash layout, whose snapshot still has the agent.
+jq -n '{sessions:[]}' >"$RESURRECT_DIR/assistant-sessions.json"
+: >"$RESURRECT_DIR/tmux_resurrect_20261029T100000.txt"
+: >"$RESURRECT_DIR/tmux_resurrect_20261030T090000.txt"
+snap_entry sid-before-crash >"$RESURRECT_DIR/tmux_resurrect_20261029T100000.assistant-sessions.json"
+jq -n '{sessions:[]}' >"$RESURRECT_DIR/tmux_resurrect_20261030T090000.assistant-sessions.json"
+ln -sfn tmux_resurrect_20261029T100000.txt "$RESURRECT_DIR/last"
+run_restore
+assert_contains "re-pointed last restores that layout's agents" "$(cat "$TMUX_LOG")" \
+	"command claude --resume 'sid-before-crash'"
+# A layout saved before snapshots existed has none: use the latest sidecar.
+: >"$RESURRECT_DIR/tmux_resurrect_20261028T100000.txt"
+ln -sfn tmux_resurrect_20261028T100000.txt "$RESURRECT_DIR/last"
+snap_entry sid-latest >"$RESURRECT_DIR/assistant-sessions.json"
+run_restore
+assert_contains "layout without a snapshot falls back to the latest sidecar" "$(cat "$TMUX_LOG")" \
+	"command claude --resume 'sid-latest'"
+snapshot_paths=$(
+	# shellcheck source=../scripts/lib-detect.sh
+	source "$REPO_DIR/scripts/lib-detect.sh"
+	ln -sfn tmux_resurrect_20261030T090000.txt "$RESURRECT_DIR/last"
+	printf 'current=%s\n' "$(assistant_snapshot_for_last "$RESURRECT_DIR")"
+	ln -sfn tmux_resurrect_19990101T000000.txt "$RESURRECT_DIR/last"
+	printf 'dangling=%s\n' "$(assistant_snapshot_for_last "$RESURRECT_DIR")"
+	rm -f "$RESURRECT_DIR/tmux_resurrect_20261029T100000.txt"
+	prune_assistant_snapshots "$RESURRECT_DIR"
+	ls "$RESURRECT_DIR" | grep 'assistant-sessions.json$' | tr '\n' ' '
+)
+assert_contains "snapshot path follows last" "$snapshot_paths" \
+	"current=$RESURRECT_DIR/tmux_resurrect_20261030T090000.assistant-sessions.json"
+assert_contains "a dangling last has no snapshot" "$snapshot_paths" $'dangling=\n'
+assert_not_contains "snapshot of a pruned layout is removed" "$snapshot_paths" "20261029T100000"
+assert_contains "snapshot of a kept layout survives pruning" "$snapshot_paths" "20261030T090000.assistant-sessions.json"
+rm -f "$RESURRECT_DIR"/last "$RESURRECT_DIR"/tmux_resurrect_*
+
 echo "== malformed entries are isolated =="
 export MOCK_PANES='%1|0|0|bad-env
 %2|0|0|bad-id
